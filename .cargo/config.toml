@@ -1,0 +1,15 @@
+# Target-specific linker overrides. Extend as cross-compilation targets
+# are brought online.
+#
+# Most cross-target work runs inside `cross` containers (see Cross.toml),
+# which handle linkers themselves. These entries only take effect for
+# native toolchain invocations.
+
+[alias]
+xtask = "run --package xtask --"
+
+[target.aarch64-linux-android]
+# linker = "aarch64-linux-android21-clang"
+
+[target.armv7-linux-androideabi]
+# linker = "armv7a-linux-androideabi21-clang"

@@ -1,0 +1,7 @@
+internal/*.md
+target/
+Cargo.lock
+.DS_Store
+.claude/
+default.profraw
+*.profraw

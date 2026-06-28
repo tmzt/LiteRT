@@ -1,0 +1,133 @@
+name: Build libLiteRtLmC
+
+# Builds the LiteRT-LM C engine as a shared library using Bazel (the
+# upstream's primary build system). CMake was too fragile with its
+# ExternalProject dep chain; Bazel handles everything natively.
+#
+# Strategy: build //c:engine as a static archive via Bazel, then manually
+# link it (plus deps) into a shared library with the system linker.
+on:
+  workflow_dispatch:
+    inputs:
+      litert_lm_tag:
+        description: "LiteRT-LM upstream tag to build from"
+        default: "v0.10.2"
+        type: string
+  push:
+    tags: ["lm-build-*"]
+
+env:
+  LITERT_LM_TAG: ${{ inputs.litert_lm_tag || 'v0.10.2' }}
+
+jobs:
+  build-linux-x86_64:
+    name: linux x86_64
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: clone litert-lm
+        run: |
+          git clone --depth=1 --branch=${{ env.LITERT_LM_TAG }} \
+            https://github.com/google-ai-edge/litert-lm.git /tmp/litert-lm
+
+      # Patch engine.cc: CreateDefault → CreateAny so the GPU path uses the
+      # optimized engine type (same as the upstream litert-lm CLI).
+      - name: patch engine.cc (CreateDefault → CreateAny)
+        run: |
+          sed -i 's/EngineFactory::CreateDefault/EngineFactory::CreateAny/g' \
+            /tmp/litert-lm/c/engine.cc
+          grep -n 'EngineFactory::Create' /tmp/litert-lm/c/engine.cc
+
+      # Inject a cc_binary(linkshared=True) target so Bazel itself produces
+      # the .so with full dep resolution — no manual post-link needed.
+      - name: create shared lib BUILD target
+        run: |
+          mkdir -p /tmp/litert-lm/shared_build
+          cat > /tmp/litert-lm/shared_build/BUILD <<'EOF'
+          cc_binary(
+              name = "libLiteRtLmC.so",
+              linkshared = True,
+              deps = ["//c:engine"],
+          )
+          EOF
+
+      - name: bazel build shared lib
+        working-directory: /tmp/litert-lm
+        run: |
+          bazelisk build //shared_build:libLiteRtLmC.so \
+            --compilation_mode=opt --copt=-fPIC \
+            --copt=-Wno-changes-meaning \
+            --action_env=CC=gcc --action_env=CXX=g++ \
+            2>&1 | tail -30
+
+      - name: inspect output
+        run: |
+          LIB=$(find -L /tmp/litert-lm/bazel-bin/shared_build -name 'libLiteRtLmC.so' 2>/dev/null | head -1)
+          echo "library: $LIB"
+          ls -la "$LIB"
+          echo "litert_lm_* symbols:"
+          nm -D --defined-only "$LIB" | grep 'litert_lm_' | head -10
+          echo "total litert_lm_*:"
+          nm -D --defined-only "$LIB" | grep -c 'litert_lm_'
+          cp "$LIB" /tmp/libLiteRtLmC.so
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libLiteRtLmC-linux-x86_64
+          path: /tmp/libLiteRtLmC.so
+          if-no-files-found: error
+
+  build-macos-arm64:
+    name: macos arm64
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: clone litert-lm
+        run: |
+          git clone --depth=1 --branch=${{ env.LITERT_LM_TAG }} \
+            https://github.com/google-ai-edge/litert-lm.git /tmp/litert-lm
+
+      - name: patch engine.cc (CreateDefault → CreateAny)
+        run: |
+          sed -i '' 's/EngineFactory::CreateDefault/EngineFactory::CreateAny/g' \
+            /tmp/litert-lm/c/engine.cc
+          grep -n 'EngineFactory::Create' /tmp/litert-lm/c/engine.cc
+
+      - name: create shared lib BUILD target
+        run: |
+          mkdir -p /tmp/litert-lm/shared_build
+          cat > /tmp/litert-lm/shared_build/BUILD <<'EOF'
+          cc_binary(
+              name = "libLiteRtLmC.dylib",
+              linkshared = True,
+              deps = ["//c:engine"],
+          )
+          EOF
+
+      - name: bazel build shared lib
+        working-directory: /tmp/litert-lm
+        run: |
+          bazelisk build //shared_build:libLiteRtLmC.dylib \
+            --compilation_mode=opt \
+            2>&1 | tail -30
+
+      - name: inspect output
+        run: |
+          LIB=$(find -L /tmp/litert-lm/bazel-bin/shared_build -name 'libLiteRtLmC.dylib' 2>/dev/null | head -1)
+          echo "library: $LIB"
+          ls -la "$LIB"
+          echo "litert_lm_* symbols:"
+          nm -gU "$LIB" | grep 'litert_lm_' | head -10
+          echo "total litert_lm_*:"
+          nm -gU "$LIB" | grep -c 'litert_lm_'
+          cp "$LIB" /tmp/libLiteRtLmC.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libLiteRtLmC-macos-arm64
+          path: /tmp/libLiteRtLmC.dylib
+          if-no-files-found: error

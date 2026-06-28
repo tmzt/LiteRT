@@ -1,0 +1,337 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 63ff28e..a474c51 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -27,6 +27,22 @@ if(NOT DEFINED LITERTLM_HOST_FLATC)
+     set(LITERTLM_HOST_FLATC_BIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/prebuild/build/external/flatbuffers/install/bin")
+ endif()
+ 
++# Locate native host compilers for the prebuild stage. When invoked under
++# `emcmake` (or any cross-compile env), the parent CMake's CC/CXX point at
++# the cross compiler — but the prebuild builds host-runnable tools (protoc,
++# flatc) and must use the native compiler. Allow override via cache args
++# in case the host has neither clang nor gcc on PATH.
++if(NOT DEFINED LITERTLM_HOST_C_COMPILER)
++    find_program(LITERTLM_HOST_C_COMPILER NAMES clang gcc cc
++        HINTS /usr/bin /usr/local/bin /opt/homebrew/bin
++        DOC "Native host C compiler for the prebuild (host-tool) stage")
++endif()
++if(NOT DEFINED LITERTLM_HOST_CXX_COMPILER)
++    find_program(LITERTLM_HOST_CXX_COMPILER NAMES clang++ g++ c++
++        HINTS /usr/bin /usr/local/bin /opt/homebrew/bin
++        DOC "Native host C++ compiler for the prebuild (host-tool) stage")
++endif()
++
+ include(ExternalProject)
+ 
+ set(LITERTLM_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH "LiteRT-LM: Absolute path to the repository root")
+@@ -36,6 +52,14 @@ set(_PREBUILD_DEPENDENCY "")
+ 
+ if(LITERTLM_TOOLCHAIN_ARGS)
+     message(STATUS "[LiteRTLM] Toolchain args detected. Generating Host Prebuild phase...")
++    if(NOT LITERTLM_HOST_C_COMPILER OR NOT LITERTLM_HOST_CXX_COMPILER)
++        message(FATAL_ERROR
++            "[LiteRTLM] Cross-compiling but no native host compiler found.\n"
++            "  Set -DLITERTLM_HOST_C_COMPILER=/path/to/clang and\n"
++            "  -DLITERTLM_HOST_CXX_COMPILER=/path/to/clang++.")
++    endif()
++    message(STATUS "[LiteRTLM] Host C compiler:   ${LITERTLM_HOST_C_COMPILER}")
++    message(STATUS "[LiteRTLM] Host C++ compiler: ${LITERTLM_HOST_CXX_COMPILER}")
+     ExternalProject_Add(
+         litert_lm_prebuild
+ 
+@@ -48,8 +72,61 @@ if(LITERTLM_TOOLCHAIN_ARGS)
+         DOWNLOAD_DIR "${CMAKE_CURRENT_BINARY_DIR}/prebuild/download"
+         INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/prebuild/install"
+ 
+-        CMAKE_ARGS
+-            "-DLITERTLM_PROJECT_ROOT=${LITERTLM_PROJECT_ROOT}"
++        # Force a clean native build environment for the host prebuild
++        # stage. ExternalProject_Add inherits the parent's env, which under
++        # emcmake puts CC=emcc / CMAKE_TOOLCHAIN_FILE=Emscripten.cmake into
++        # scope. Run cmake via -E env --unset on BOTH the configure and
++        # build steps — the build step recursively spawns child cmake
++        # invocations (for absl/gtest/re2/etc. ExternalProjects inside the
++        # prebuild's own CMakeLists.txt) which would otherwise re-pick-up
++        # emcc from their inherited env.
++        # protobuf v6.31.1's protoc-gen-upbdefs/protoc-gen-upb link against
++        # libabsl_time_zone.a which references CoreFoundation symbols
++        # (CFStringGetMaximumSizeForEncoding, CFTimeZoneCopyDefault, ...) on
++        # macOS. Their CMakeLists doesn't add `-framework CoreFoundation`
++        # automatically, so we inject it via LDFLAGS env var, which CMake
++        # picks up at configure time and propagates to all child Makefiles.
++        # Linux/other hosts: the var is empty and the export is a no-op.
++        #
++        # CARGO_TARGET_<triple>_LINKER and CC_<triple>/CXX_<triple> override
++        # the inherited CC=emcc/CXX=em++ for tokenizers-cpp's Rust crates
++        # (onig_sys uses cc-rs which would otherwise pick up emcc's clang
++        # for native host compilation, failing with "stdlib.h not found").
++        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env
++            --unset=CC --unset=CXX
++            --unset=CMAKE_TOOLCHAIN_FILE
++            --unset=EMSDK --unset=EMSDK_NODE --unset=EMSDK_PYTHON
++            --unset=EMCC_CFLAGS --unset=EMCC_FORCE_STDLIBS
++            "LDFLAGS=$<$<PLATFORM_ID:Darwin>:-framework CoreFoundation>"
++            "CC_aarch64_apple_darwin=${LITERTLM_HOST_C_COMPILER}"
++            "CXX_aarch64_apple_darwin=${LITERTLM_HOST_CXX_COMPILER}"
++            "CC_x86_64_apple_darwin=${LITERTLM_HOST_C_COMPILER}"
++            "CXX_x86_64_apple_darwin=${LITERTLM_HOST_CXX_COMPILER}"
++            "CC_x86_64_unknown_linux_gnu=${LITERTLM_HOST_C_COMPILER}"
++            "CXX_x86_64_unknown_linux_gnu=${LITERTLM_HOST_CXX_COMPILER}"
++            "CC_aarch64_unknown_linux_gnu=${LITERTLM_HOST_C_COMPILER}"
++            "CXX_aarch64_unknown_linux_gnu=${LITERTLM_HOST_CXX_COMPILER}"
++            ${CMAKE_COMMAND} -S <SOURCE_DIR> -B <BINARY_DIR>
++                "-DCMAKE_C_COMPILER=${LITERTLM_HOST_C_COMPILER}"
++                "-DCMAKE_CXX_COMPILER=${LITERTLM_HOST_CXX_COMPILER}"
++                "-DLITERTLM_PROJECT_ROOT=${LITERTLM_PROJECT_ROOT}"
++                "-DCMAKE_BUILD_TYPE=Release"
++
++        BUILD_COMMAND ${CMAKE_COMMAND} -E env
++            --unset=CC --unset=CXX
++            --unset=CMAKE_TOOLCHAIN_FILE
++            --unset=EMSDK --unset=EMSDK_NODE --unset=EMSDK_PYTHON
++            --unset=EMCC_CFLAGS --unset=EMCC_FORCE_STDLIBS
++            "LDFLAGS=$<$<PLATFORM_ID:Darwin>:-framework CoreFoundation>"
++            "CC_aarch64_apple_darwin=${LITERTLM_HOST_C_COMPILER}"
++            "CXX_aarch64_apple_darwin=${LITERTLM_HOST_CXX_COMPILER}"
++            "CC_x86_64_apple_darwin=${LITERTLM_HOST_C_COMPILER}"
++            "CXX_x86_64_apple_darwin=${LITERTLM_HOST_CXX_COMPILER}"
++            "CC_x86_64_unknown_linux_gnu=${LITERTLM_HOST_C_COMPILER}"
++            "CXX_x86_64_unknown_linux_gnu=${LITERTLM_HOST_CXX_COMPILER}"
++            "CC_aarch64_unknown_linux_gnu=${LITERTLM_HOST_C_COMPILER}"
++            "CXX_aarch64_unknown_linux_gnu=${LITERTLM_HOST_CXX_COMPILER}"
++            ${CMAKE_COMMAND} --build <BINARY_DIR>
+ 
+         INSTALL_COMMAND ""
+     )
+@@ -94,6 +171,34 @@ ExternalProject_Add(
+         "-DLITERTLM_HOST_FLATC=${LITERTLM_HOST_FLATC}"
+         "-DLITERTLM_HOST_FLATC_BIN_DIR=${LITERTLM_HOST_FLATC_BIN_DIR}"
+ 
++        # re2_external's find_package(absl REQUIRED) was failing in MODULE
++        # mode (it looks for Findabsl.cmake which doesn't exist; abseil
++        # ships abslConfig.cmake for CONFIG mode). Force CONFIG mode
++        # globally so all sub-ExternalProjects use the absl_DIR /
++        # CMAKE_PREFIX_PATH hints we pass them.
++        "-DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON"
++
++    # During the cross stage's build, cargo invokes Rust crates' build.rs
++    # scripts which need to compile + link a HOST executable (not wasm).
++    # The default build env has CC=emcc/CXX=em++ from the parent emcmake;
++    # cargo's cc-rs picks those up and emcc tries to link a host binary
++    # (failing with `wasm-ld: error: unknown argument: --as-needed` etc).
++    # Setting per-host-triple CC_/CXX_ env vars steers cc-rs back to
++    # native clang for build scripts while leaving CC=emcc in place for
++    # the actual cross compile.
++    BUILD_COMMAND ${CMAKE_COMMAND} -E env
++        "CC_aarch64_apple_darwin=${LITERTLM_HOST_C_COMPILER}"
++        "CXX_aarch64_apple_darwin=${LITERTLM_HOST_CXX_COMPILER}"
++        "CC_x86_64_apple_darwin=${LITERTLM_HOST_C_COMPILER}"
++        "CXX_x86_64_apple_darwin=${LITERTLM_HOST_CXX_COMPILER}"
++        "CC_x86_64_unknown_linux_gnu=${LITERTLM_HOST_C_COMPILER}"
++        "CXX_x86_64_unknown_linux_gnu=${LITERTLM_HOST_CXX_COMPILER}"
++        "CC_aarch64_unknown_linux_gnu=${LITERTLM_HOST_C_COMPILER}"
++        "CXX_aarch64_unknown_linux_gnu=${LITERTLM_HOST_CXX_COMPILER}"
++        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=${LITERTLM_HOST_C_COMPILER}"
++        "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=${LITERTLM_HOST_C_COMPILER}"
++        ${CMAKE_COMMAND} --build <BINARY_DIR>
++
+     INSTALL_COMMAND ""
+     BUILD_ALWAYS TRUE
+ )
+diff --git a/cmake/modules/fetch_content.cmake b/cmake/modules/fetch_content.cmake
+index a3f24e8..18aa052 100644
+--- a/cmake/modules/fetch_content.cmake
++++ b/cmake/modules/fetch_content.cmake
+@@ -80,12 +80,22 @@ FetchContent_Populate(llguidance)
+ 
+ # --- LibPNG ---
+ set(LIBPNG_SRC_DIR ${THIRD_PARTY_DIR}/libpng CACHE PATH "Path to libpng source directory")
++# libpng v1.6.40's pngpriv.h includes <fp.h> when TARGET_OS_MAC is defined,
++# but TARGET_OS_MAC is set on *modern* macOS too (and fp.h is a Classic Mac
++# header that no longer exists). Strip TARGET_OS_MAC from that conditional
++# so we fall through to the <math.h> branch. Same patch is needed on emcc
++# because emscripten's libc doesn't have <fp.h> either.
++#
++# Use sed in-place. macOS sed needs `-i ''` (BSD), GNU sed accepts `-i`.
+ FetchContent_Declare(
+   libpng_lib
+   GIT_REPOSITORY https://github.com/glennrp/libpng.git
+   GIT_TAG v1.6.40
+   GIT_SHALLOW true
+   SOURCE_DIR ${LIBPNG_SRC_DIR}
++  PATCH_COMMAND
++    ${CMAKE_COMMAND} -DPNGPRIV_H=${LIBPNG_SRC_DIR}/pngpriv.h
++                     -P ${LITERTLM_PACKAGES_DIR}/../scripts/patch_libpng_pngpriv.cmake
+ )
+ block()
+   set(PNG_SHARED OFF)
+@@ -94,7 +104,19 @@ block()
+   set(SKIP_INSTALL_ALL ON)
+ 
+   # Handle ZLIB dependency injection for PNG
+-  if(TARGET zlib)
++  if(EMSCRIPTEN)
++    # emscripten ships zlib via its port system. `embuilder build zlib`
++    # populates the library at this path; the CI workflow runs that
++    # ahead of time. Setting these as CACHE FORCE overrides libpng's
++    # find_package(ZLIB REQUIRED) so we don't depend on the FetchContent
++    # zlib_lib target order or on the cross-stage having a `zlib` target.
++    set(_emcc_sysroot "$ENV{EMSDK}/upstream/emscripten/cache/sysroot")
++    set(ZLIB_INCLUDE_DIR "${_emcc_sysroot}/include" CACHE PATH "emscripten zlib include" FORCE)
++    set(ZLIB_LIBRARY "${_emcc_sysroot}/lib/wasm32-emscripten/libz.a" CACHE FILEPATH "emscripten zlib library" FORCE)
++    set(ZLIB_FOUND TRUE CACHE BOOL "emscripten zlib found" FORCE)
++    add_compile_options(-sUSE_ZLIB=1)
++    add_link_options(-sUSE_ZLIB=1)
++  elseif(TARGET zlib)
+     get_target_property(ZLIB_INCLUDE_DIR zlib INTERFACE_INCLUDE_DIRECTORIES)
+     set(ZLIB_LIBRARY zlib)
+   elseif(TARGET zlibstatic)
+@@ -221,21 +243,34 @@ endif()
+ 
+ # --- ZLIB ---
+ set(ZLIB_SRC_DIR ${THIRD_PARTY_DIR}/zlib CACHE PATH "Path to zlib source directory")
+-FetchContent_Declare(
+-  zlib_lib
+-  GIT_REPOSITORY https://github.com/madler/zlib
+-  GIT_TAG master
+-  GIT_SHALLOW true
+-  SOURCE_DIR ${ZLIB_SRC_DIR}
+-)
+-block()
+-  set(BUILD_SHARED_LIBS OFF)
+-  FetchContent_MakeAvailable(zlib_lib)
+-endblock()
+-if(TARGET zlibstatic)
+-  add_library(zlib_lib ALIAS zlibstatic)
+-elseif(TARGET zlib)
+-  add_library(zlib_lib ALIAS zlib)
++if(EMSCRIPTEN)
++  # Skip the zlib FetchContent build entirely under emcc — zlib master's
++  # CMakeLists unconditionally declares an `add_library(zlib SHARED ...)`
++  # target which emcc rejects ("target platform does not support dynamic
++  # linking"). Instead we lean on emscripten's bundled zlib port (built
++  # ahead of time via `embuilder build zlib` in the CI workflow) and
++  # expose `zlib_lib` as an INTERFACE target that propagates the
++  # -sUSE_ZLIB=1 link flag to consumers.
++  add_library(zlib_lib INTERFACE)
++  target_compile_options(zlib_lib INTERFACE -sUSE_ZLIB=1)
++  target_link_options(zlib_lib INTERFACE -sUSE_ZLIB=1)
++else()
++  FetchContent_Declare(
++    zlib_lib
++    GIT_REPOSITORY https://github.com/madler/zlib
++    GIT_TAG master
++    GIT_SHALLOW true
++    SOURCE_DIR ${ZLIB_SRC_DIR}
++  )
++  block()
++    set(BUILD_SHARED_LIBS OFF)
++    FetchContent_MakeAvailable(zlib_lib)
++  endblock()
++  if(TARGET zlibstatic)
++    add_library(zlib_lib ALIAS zlibstatic)
++  elseif(TARGET zlib)
++    add_library(zlib_lib ALIAS zlib)
++  endif()
+ endif()
+ 
+ # --- Path Exports ---
+diff --git a/cmake/packages/litert/litert.cmake b/cmake/packages/litert/litert.cmake
+index f314c92..29c47a1 100644
+--- a/cmake/packages/litert/litert.cmake
++++ b/cmake/packages/litert/litert.cmake
+@@ -77,10 +77,18 @@ ExternalProject_Add(
+     -DLITERT_BUILD_CONFIG_DISABLE_GPU_VAL=${LITERT_BUILD_CONFIG_DISABLE_GPU_VAL}
+     -DLITERT_BUILD_CONFIG_DISABLE_NPU_VAL=${LITERT_BUILD_CONFIG_DISABLE_NPU_VAL}
+     -P "${LITERT_PACKAGE_DIR}/litert_patcher.cmake"
++    # Restore the truncated cc/options/CMakeLists.txt that defines
++    # litert_cc_options (referenced by libLiteRt.dylib + several tools).
++    COMMAND ${CMAKE_COMMAND}
++    -DCC_OPTIONS_CMAKELISTS=${LITERT_SRC_DIR}/cc/options/CMakeLists.txt
++    -P "${LITERTLM_PACKAGES_DIR}/../scripts/patch_litert_cc_options.cmake"
+ 
+   CMAKE_ARGS
+     ${LITERTLM_TOOLCHAIN_FILE}
+     ${LITERTLM_TOOLCHAIN_ARGS}
++    # NOTE: CoreFoundation framework injection happens on the
++    # CMAKE_EXE_LINKER_FLAGS line below (combined with -L paths) — that
++    # line is the authoritative one for litert's link flags.
+     -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+     -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+     -DCMAKE_POLICY_DEFAULT_CMP0169=OLD
+@@ -141,7 +149,11 @@ ExternalProject_Add(
+     -DLITERT_DISABLE_KLEIDIAI=ON
+     -DLITERT_BUILD_C_API=ON
+     -DLITERT_BUILD_TOOLS=OFF
+-    "-DCMAKE_EXE_LINKER_FLAGS=-L${ABSL_LIB_DIR} -L${PROTO_LIB_DIR} -L${FLATBUFFERS_LIB_DIR} -L${TFLITE_LIB_DIR}"
++    # Combined: -L paths for absl/proto/flatbuffers/tflite installs, plus
++    # `-framework CoreFoundation` on Apple (TFLite's analyze_model and
++    # other tools link absl_time_zone → CF symbols). Replacing the line
++    # above (line 86) since this one overrides CMAKE_EXE_LINKER_FLAGS.
++    "-DCMAKE_EXE_LINKER_FLAGS=-L${ABSL_LIB_DIR} -L${PROTO_LIB_DIR} -L${FLATBUFFERS_LIB_DIR} -L${TFLITE_LIB_DIR}$<$<PLATFORM_ID:Darwin>: -framework CoreFoundation>"
+ 
+     # TODO(totero): Organize these flags.
+     -DLITERTLM_MODULES_DIR=${LITERTLM_MODULES_DIR}
+diff --git a/cmake/packages/protobuf/protobuf.cmake b/cmake/packages/protobuf/protobuf.cmake
+index 5131f2b..00a5f3a 100644
+--- a/cmake/packages/protobuf/protobuf.cmake
++++ b/cmake/packages/protobuf/protobuf.cmake
+@@ -71,6 +71,12 @@ if(NOT EXISTS "${PROTO_CONFIG_CMAKE_FILE}")
+       -Dprotobuf_BUILD_LIBPROTOC=ON
+       -Dprotobuf_BUILD_PROTOBUF_BINARIES=ON
+       -Dprotobuf_LOCAL_DEPENDENCIES_ONLY=ON
++      # protoc-gen-upbdefs/protoc-gen-upb (UPB code generators for Rust/JS
++      # bindings) link libabsl_time_zone.a which references CoreFoundation
++      # symbols on Apple. protobuf's CMakeLists doesn't add the framework
++      # automatically, so inject it via EXE_LINKER_FLAGS. On non-Apple this
++      # generator expression evaluates to empty and is a no-op.
++      "$<$<PLATFORM_ID:Darwin>:-DCMAKE_EXE_LINKER_FLAGS=-framework CoreFoundation>"
+       -Dabsl_DIR=${ABSL_INSTALL_PREFIX}/lib/cmake/absl
+       -DGTest_DIR=${GTEST_INSTALL_PREFIX}/lib/cmake/GTest
+       -DProtobuf_DIR=${PROTO_INSTALL_PREFIX}/lib/cmake/Protobuf
+diff --git a/cmake/packages/sentencepiece/sentencepiece.cmake b/cmake/packages/sentencepiece/sentencepiece.cmake
+index 426fec0..61a6c96 100644
+--- a/cmake/packages/sentencepiece/sentencepiece.cmake
++++ b/cmake/packages/sentencepiece/sentencepiece.cmake
+@@ -76,6 +76,10 @@ if(NOT EXISTS "${SENTENCE_LIBRARY_STATIC}")
+       -DSPM_PROTOBUF_PROVIDER=package
+       -DSPM_ENABLE_SHARED=OFF
+       -DSPM_ENABLE_TCMALLOC=OFF
++      # spm_train/spm_encode/spm_decode/spm_normalize/spm_export_vocab link
++      # libabsl_time_zone.a → CoreFoundation symbols on Apple. Inject the
++      # framework link via EXE_LINKER_FLAGS. No-op on non-Apple.
++      "$<$<PLATFORM_ID:Darwin>:-DCMAKE_EXE_LINKER_FLAGS=-framework CoreFoundation>"
+ 
+       -Dabsl_DIR=${ABSL_INSTALL_PREFIX}/lib/cmake/absl
+       -DABSL_INCLUDE_DIRS=${ABSL_INCLUDE_DIR}
+diff --git a/cmake/packages/tflite/tflite.cmake b/cmake/packages/tflite/tflite.cmake
+index 789c9cb..03789b6 100644
+--- a/cmake/packages/tflite/tflite.cmake
++++ b/cmake/packages/tflite/tflite.cmake
+@@ -81,8 +81,12 @@ if(NOT EXISTS "${TFLITE_STATIC_LIB}")
+             -DCMAKE_CXX_STANDARD=${CMAKE_CXX_STANDARD}
+             -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+             -DCMAKE_POSITION_INDEPENDENT_CODE=ON
++            # TFLite's CLI tools (benchmark_model, label_image, etc.) link
++            # absl_time_zone.a → CoreFoundation symbols on Apple. Inject
++            # the framework. No-op on non-Apple via generator expression.
++            "$<$<PLATFORM_ID:Darwin>:-DCMAKE_EXE_LINKER_FLAGS=-framework CoreFoundation>"
++
+ 
+-            
+             -Dabsl_DIR=${ABSL_INSTALL_PREFIX}/lib/cmake/absl
+             -D_abseil-cpp_LICENSE_FILE:FILEPATH=${ABSL_SRC_DIR}/absl_external/LICENSE
+             -DABSL_INCLUDE_DIR=${ABSL_INCLUDE_DIR}
+@@ -122,6 +126,11 @@ if(NOT EXISTS "${TFLITE_STATIC_LIB}")
+             -DTFLITE_ENABLE_RESOURCE_VARIABLE=OFF
+             -DXNNPACK_SET_VERBOSITY=OFF
+             -DTFLITE_ENABLE_GPU=OFF
++            # XNNPACK's KleidiAI integration (Apple SME matrix kernels)
++            # references kai_* symbols from the KleidiAI library. We don't
++            # build KleidiAI here, so disable to avoid linker errors when
++            # libLiteRt.dylib links libxnnpack-microkernels-prod.a.
++            -DXNNPACK_ENABLE_KLEIDIAI=OFF
+ 
+             -DTFLITE_SRC_DIR=${TFLITE_SRC_DIR}
+             -DTFLITE_BUILD_DIR=${TFLITE_BUILD_DIR}
