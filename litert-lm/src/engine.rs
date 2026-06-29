@@ -222,7 +222,25 @@ impl Engine {
     /// Returns [`Error::SessionCreationFailed`] if the runtime rejects the
     /// configuration.
     pub fn create_conversation(&self, params: SamplerParams) -> Result<Conversation> {
-        Conversation::new(self.inner.clone(), params)
+        Conversation::new(self.inner.clone(), params, None)
+    }
+
+    /// Like [`create_conversation`] but installs a system message on the
+    /// conversation config before the C side creates the handle. The
+    /// system message is prefilled into the KV cache before any user
+    /// turn, so it persists across `send_message_stream` calls (and
+    /// across [`Conversation::clone`] — the prefilled system tokens
+    /// come along for the ride).
+    ///
+    /// `system_message` is the raw instruction text; the wrapper wraps
+    /// it as `{"role":"system","content":[{"type":"text","text":...}]}`
+    /// for the C API. Pass a string literal — no JSON escaping needed.
+    pub fn create_conversation_with_system(
+        &self,
+        params: SamplerParams,
+        system_message: &str,
+    ) -> Result<Conversation> {
+        Conversation::new(self.inner.clone(), params, Some(system_message))
     }
 
     #[allow(dead_code)]

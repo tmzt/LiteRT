@@ -34,7 +34,11 @@ unsafe impl Send for Conversation {}
 
 impl Conversation {
     /// Creates a new conversation from an engine with the given sampler params.
-    pub(crate) fn new(engine: Arc<EngineInner>, params: SamplerParams) -> Result<Self> {
+    pub(crate) fn new(
+        engine: Arc<EngineInner>,
+        params: SamplerParams,
+        system_message: Option<&str>,
+    ) -> Result<Self> {
         let config = unsafe { sys::litert_lm_session_config_create() };
         if config.is_null() {
             return Err(Error::NullPointer);
@@ -56,6 +60,28 @@ impl Conversation {
             sys::litert_lm_conversation_config_set_session_config(conv_config, config);
         }
         unsafe { sys::litert_lm_session_config_delete(config) };
+
+        // Optional system message — same JSON shape as send_message_stream
+        // (`{"role":"system","content":[{"type":"text","text":"..."}]}`).
+        // Holding the CString in a local keeps the pointer valid until
+        // `conversation_create` consumes the config below.
+        let _sys_holder: Option<CString>;
+        if let Some(msg) = system_message {
+            let json = format!(
+                r#"{{"role":"system","content":[{{"type":"text","text":{}}}]}}"#,
+                serde_json_escape(msg)
+            );
+            let c = CString::new(json).map_err(|_| {
+                unsafe { sys::litert_lm_conversation_config_delete(conv_config) };
+                Error::SessionCreationFailed
+            })?;
+            unsafe {
+                sys::litert_lm_conversation_config_set_system_message(conv_config, c.as_ptr());
+            }
+            _sys_holder = Some(c);
+        } else {
+            _sys_holder = None;
+        }
 
         let conv_ptr =
             unsafe { sys::litert_lm_conversation_create(engine.ptr.as_ptr(), conv_config) };
