@@ -32,6 +32,31 @@ pub struct Conversation {
 
 unsafe impl Send for Conversation {}
 
+/// Clone-able, thread-safe handle for cancelling a
+/// [`Conversation`]'s in-flight inference. Obtain via
+/// [`Conversation::cancel_handle`]. See that method's docs for the
+/// outlives-the-source safety contract.
+#[derive(Clone)]
+pub struct CancelHandle {
+    ptr: NonNull<sys::LiteRtLmConversation>,
+}
+
+// The upstream C `litert_lm_conversation_cancel_process` is
+// documented as the cross-thread cancel primitive — safe to call
+// concurrently with another thread's `send_message_stream`. That's
+// the entire surface of CancelHandle, so Send + Sync are sound.
+unsafe impl Send for CancelHandle {}
+unsafe impl Sync for CancelHandle {}
+
+impl CancelHandle {
+    /// Cancel the in-flight inference on the source conversation.
+    /// Idempotent — calling when no inference is running is a no-op
+    /// per the upstream C API contract.
+    pub fn cancel(&self) {
+        unsafe { sys::litert_lm_conversation_cancel_process(self.ptr.as_ptr()) };
+    }
+}
+
 impl Conversation {
     /// Creates a new conversation from an engine with the given sampler params.
     pub(crate) fn new(
@@ -137,6 +162,28 @@ impl Conversation {
     pub fn with_visual_token_budget(mut self, budget: i32) -> Self {
         self.visual_token_budget = Some(budget);
         self
+    }
+
+    /// Get a clone-able, Send+Sync handle for cancelling an
+    /// in-flight inference on this conversation from another
+    /// thread. `Conversation` itself is not `Sync` (most of its
+    /// methods are `&mut self`), but `cancel_process` is the
+    /// upstream-documented exception — it's safe to call
+    /// concurrently with a blocked `send_message_stream` on
+    /// another thread. We surface that capability through a
+    /// separate Send+Sync handle so the borrow checker can stay
+    /// honest about everything else.
+    ///
+    /// **Safety contract:** every [`CancelHandle`] clone must be
+    /// dropped (or proved unreachable) before the source
+    /// `Conversation` drops. The handle holds a raw pointer that
+    /// `Conversation::drop` invalidates via
+    /// `litert_lm_conversation_delete`. Typical owner: the
+    /// `chitin-model-api` slot, which clears its
+    /// `Arc<Mutex<Option<CancelHandle>>>` under-lock before the
+    /// scoped Conversation falls out of scope.
+    pub fn cancel_handle(&self) -> CancelHandle {
+        CancelHandle { ptr: self.ptr }
     }
 
     /// Sends a message and streams the response token-by-token.
@@ -261,6 +308,20 @@ impl Conversation {
             return Err(Error::GenerationFailed(err));
         }
         Ok(())
+    }
+
+    /// Cancels an in-flight inference on this conversation, causing the
+    /// concurrent [`send_message_stream`](Self::send_message_stream) (or
+    /// any other `send_*`) call to return early.
+    ///
+    /// Thread-safe relative to a concurrent send: takes `&self` so it can
+    /// be invoked from a different thread than the one that owns the
+    /// `&mut self` send call. Idempotent — a no-op if no inference is
+    /// currently running. Intended for SIGUSR2 / Ctrl-C cancel paths in
+    /// `chitin-model-api`'s `model_api_server`, where a signal-handler
+    /// tick needs to abort a long-running generation.
+    pub fn cancel_process(&self) {
+        unsafe { sys::litert_lm_conversation_cancel_process(self.ptr.as_ptr()) }
     }
 
     /// Sends a message and returns the full response (blocking).

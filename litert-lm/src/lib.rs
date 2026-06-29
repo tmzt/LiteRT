@@ -30,7 +30,7 @@ mod input;
 mod sampler;
 mod session;
 
-pub use conversation::Conversation;
+pub use conversation::{CancelHandle, Conversation};
 pub use engine::{Backend, Engine, EngineSettings};
 pub use error::{Error, Result};
 pub use input::Input;
