@@ -295,6 +295,11 @@ extern "C" {
     pub fn litert_lm_conversation_delete(conversation: *mut LiteRtLmConversation);
 }
 extern "C" {
+    pub fn litert_lm_conversation_clone(
+        conversation: *mut LiteRtLmConversation,
+    ) -> *mut LiteRtLmConversation;
+}
+extern "C" {
     pub fn litert_lm_conversation_send_message(
         conversation: *mut LiteRtLmConversation,
         message_json: *const ::std::os::raw::c_char,

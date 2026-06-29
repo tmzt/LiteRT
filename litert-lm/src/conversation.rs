@@ -69,6 +69,38 @@ impl Conversation {
         })
     }
 
+    /// Duplicates this conversation, deep-copying its prefilled KV-cache
+    /// state on the C side.
+    ///
+    /// This is a cheap KV-state duplication primitive — much cheaper than
+    /// re-prefilling the prompt from scratch. It is used by the chitin
+    /// `model_api_server`'s prefix cache to fan a single prefilled prompt
+    /// out to multiple in-flight generations without re-paying the prefill
+    /// cost.
+    ///
+    /// Intentionally `pub` for that downstream consumer; not part of the
+    /// standard [`Clone`] trait because allocation can fail (the C side
+    /// returns NULL on OOM / shape mismatch), and we mirror the crate's
+    /// `Result`-returning convention.
+    ///
+    /// Per the upstream C header
+    /// (`litert_lm_conversation_clone` in `engine.h`), the cloned
+    /// conversation owns its own copy of the KV tensors, so the source and
+    /// the clone can be advanced independently after this call.
+    ///
+    /// The clone inherits the source's `visual_token_budget` and pins the
+    /// same [`EngineInner`] alive via a refcount bump on the shared
+    /// `Arc<EngineInner>`.
+    pub fn clone(&self) -> Result<Self> {
+        let cloned = unsafe { sys::litert_lm_conversation_clone(self.ptr.as_ptr()) };
+        let ptr = NonNull::new(cloned).ok_or(Error::SessionCreationFailed)?;
+        Ok(Self {
+            ptr,
+            _engine: Arc::clone(&self._engine),
+            visual_token_budget: self.visual_token_budget,
+        })
+    }
+
     /// Set the per-send visual token budget passed in
     /// `LiteRtLmConversationOptionalArgs`. Multimodal Gemma-4 (and
     /// other vision-capable) `.litertlm` files require this to be
@@ -274,6 +306,36 @@ pub(crate) fn serde_json_escape(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Engine, EngineSettings};
+
+    /// Smoke test for [`Conversation::clone`]. Requires a real model file
+    /// (no in-process way to construct a `Conversation` without an
+    /// engine, since `Conversation::new` is `pub(crate)` and `Engine::new`
+    /// loads a `.litertlm` file). Set `LITERTLM_TEST_MODEL` to enable.
+    ///
+    /// Marked `#[ignore]` because the rest of the crate currently has no
+    /// CI-runnable tests and we don't want `cargo test -p litertlm` to
+    /// start needing a multi-GB model in tree.
+    #[test]
+    #[ignore = "needs LITERTLM_TEST_MODEL pointing at a .litertlm file"]
+    fn clone_roundtrip() {
+        let model = std::env::var("LITERTLM_TEST_MODEL")
+            .expect("set LITERTLM_TEST_MODEL to a .litertlm file path");
+        let engine = Engine::new(EngineSettings::new(&model)).expect("engine");
+        let conv = engine
+            .create_conversation(SamplerParams::default())
+            .expect("conversation");
+        let cloned = conv.clone().expect("clone");
+        // Distinct C-side allocations.
+        assert_ne!(conv.ptr.as_ptr(), cloned.ptr.as_ptr());
+        // visual_token_budget is carried over.
+        assert_eq!(conv.visual_token_budget, cloned.visual_token_budget);
+    }
 }
 
 /// Try to extract text from a conversation JSON chunk.
